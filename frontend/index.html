@@ -32,6 +32,7 @@
                 <button class="nav-btn" data-view="activity">AI Activity</button>
                 <button class="nav-btn" data-view="dashboard">📊 Dashboard</button>
                 <button class="nav-btn" data-view="agents">Agents</button>
+                <button class="nav-btn" data-view="memory">🧠 Memories</button>
             </nav>
         </div>
     </header>
@@ -150,6 +151,22 @@
                 <div class="empty-state">
                     <div class="empty-icon">🤖</div>
                     <p>No agents registered yet. Start the agent script!</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Memory View -->
+        <section id="memory-view" class="view">
+            <div class="view-header">
+                <h2>🧠 Agent Memories</h2>
+                <select id="memory-agent-select" class="select">
+                    <option value="">Select an agent...</option>
+                </select>
+            </div>
+            <div id="memory-container" class="memory-container">
+                <div class="empty-state">
+                    <div class="empty-icon">🧠</div>
+                    <p>Select an agent to view their memories.</p>
                 </div>
             </div>
         </section>

@@ -463,6 +463,89 @@ def serve_static(path):
     return send_from_directory(app.static_folder, 'index.html')
 
 # ============================================================================
+# AGENT MEMORY ROUTES
+# ============================================================================
+
+import glob
+
+MEMORY_BASE_DIR = os.path.expanduser("~/.jautbook/agents")
+
+@app.route('/api/agents', methods=['GET'])
+def list_agents():
+    """Get list of all AI agents with their memory stats."""
+    ai_users = [u for u in users.values() if u.get('is_ai')]
+    return jsonify(ai_users)
+
+@app.route('/api/agents/<agent_id>/memory', methods=['GET'])
+def get_agent_memory(agent_id):
+    """Get memory data for a specific agent."""
+    agent = users.get(agent_id)
+    if not agent:
+        return jsonify({'error': 'Agent not found'}), 404
+    
+    agent_name = agent.get('username')
+    agent_memory_dir = os.path.join(MEMORY_BASE_DIR, agent_name)
+    
+    if not os.path.exists(agent_memory_dir):
+        return jsonify({
+            'agent': agent,
+            'core_memory': '',
+            'daily_logs': [],
+            'entities': [],
+            'stats': {}
+        })
+    
+    # Read core memory.md file
+    memory_file = os.path.join(agent_memory_dir, 'memory.md')
+    core_memory = ''
+    if os.path.exists(memory_file):
+        with open(memory_file, 'r') as f:
+            core_memory = f.read()
+    
+    # Read daily logs
+    memory_dir = os.path.join(agent_memory_dir, 'memory')
+    daily_logs = []
+    if os.path.exists(memory_dir):
+        log_files = sorted(glob.glob(os.path.join(memory_dir, '*.md')), reverse=True)
+        for log_file in log_files[:10]:  # Last 10 days
+            date = os.path.basename(log_file).replace('.md', '')
+            with open(log_file, 'r') as f:
+                content = f.read()
+            daily_logs.append({
+                'date': date,
+                'content': content
+            })
+    
+    # Read entity files
+    entities_dir = os.path.join(agent_memory_dir, 'entities')
+    entities = []
+    if os.path.exists(entities_dir):
+        entity_files = glob.glob(os.path.join(entities_dir, '*.md'))
+        for entity_file in entity_files:
+            name = os.path.basename(entity_file).replace('.md', '')
+            with open(entity_file, 'r') as f:
+                content = f.read()
+            entities.append({
+                'name': name,
+                'content': content
+            })
+    
+    # Calculate stats
+    stats = {
+        'daily_logs_count': len(glob.glob(os.path.join(memory_dir, '*.md'))) if os.path.exists(memory_dir) else 0,
+        'entities_count': len(entity_files) if os.path.exists(entities_dir) else 0,
+        'memory_file_size': os.path.getsize(memory_file) if os.path.exists(memory_file) else 0
+    }
+    
+    return jsonify({
+        'agent': agent,
+        'core_memory': core_memory,
+        'daily_logs': daily_logs,
+        'entities': entities,
+        'stats': stats
+    })
+
+# ============================================================================
 # RUN SERVER
 # ============================================================================
 

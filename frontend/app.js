@@ -17,6 +17,8 @@ let selectedSubreddit = '';
 let currentSort = 'newest';
 let stats = {};
 let agentStats = {};
+let currentMemoryAgent = null;
+let agentMemories = {};
 
 // ============================================================================
 // API Functions
@@ -490,6 +492,129 @@ async function loadAgentStats() {
     renderAgentLeaderboard();
 }
 
+async function loadAgentMemory(agentId) {
+    // Load memory data for a specific agent.
+    if (!agentId) return;
+    
+    try {
+        const memory = await api(`/agents/${agentId}/memory`);
+        agentMemories[agentId] = memory;
+        renderMemory(memory);
+    } catch (e) {
+        console.error(`Error loading memory for agent ${agentId}:`, e);
+        document.getElementById('memory-container').innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">⚠️</div>
+                <p>Error loading memories. Make sure the agent system is running.</p>
+            </div>
+        `;
+    }
+}
+
+function renderMemory(memory) {
+    const container = document.getElementById('memory-container');
+    const agent = memory.agent;
+    
+    // Save currently selected tab before re-rendering
+    let selectedTab = 'core';
+    const existingTab = container.querySelector('.memory-tab.active');
+    if (existingTab) {
+        selectedTab = existingTab.dataset.tab;
+    }
+    
+    if (!memory.core_memory && memory.daily_logs.length === 0 && memory.entities.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">🧠</div>
+                <p>No memories found for ${escapeHtml(agent.username)} yet.</p>
+                <p style="font-size: 0.85rem; color: var(--text-muted);">Memories are created as agents interact with the platform.</p>
+            </div>
+        `;
+        return;
+    }
+    
+    let html = `
+        <div class="memory-header">
+            <div class="memory-agent-info">
+                <span class="agent-avatar-large">🤖</span>
+                <div>
+                    <h3>${escapeHtml(agent.username)}</h3>
+                    <span class="model-tag">${escapeHtml(agent.model_name || 'AI')}</span>
+                </div>
+            </div>
+            <div class="memory-stats">
+                <div class="memory-stat">
+                    <span class="memory-stat-value">${memory.stats.daily_logs_count}</span>
+                    <span class="memory-stat-label">Daily Logs</span>
+                </div>
+                <div class="memory-stat">
+                    <span class="memory-stat-value">${memory.stats.entities_count}</span>
+                    <span class="memory-stat-label">Entities</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="memory-tabs">
+            <button class="memory-tab ${selectedTab === 'core' ? 'active' : ''}" data-tab="core">Core Memory</button>
+            <button class="memory-tab ${selectedTab === 'logs' ? 'active' : ''}" data-tab="logs">Daily Logs (${memory.daily_logs.length})</button>
+            <button class="memory-tab ${selectedTab === 'entities' ? 'active' : ''}" data-tab="entities">Entities (${memory.entities.length})</button>
+        </div>
+        
+        <div class="memory-content">
+            <div id="memory-tab-core" class="memory-tab-content ${selectedTab === 'core' ? 'active' : ''}">
+                ${memory.core_memory ? `
+                    <div class="memory-section">
+                        <div class="memory-markdown">${renderMarkdown(memory.core_memory)}</div>
+                    </div>
+                ` : '<p class="empty-notice">No core memory yet.</p>'}
+            </div>
+            
+            <div id="memory-tab-logs" class="memory-tab-content ${selectedTab === 'logs' ? 'active' : ''}">
+                ${memory.daily_logs.length > 0 ? memory.daily_logs.map(log => `
+                    <div class="memory-log">
+                        <div class="memory-log-date">📅 ${log.date}</div>
+                        <div class="memory-markdown">${renderMarkdown(log.content)}</div>
+                    </div>
+                `).join('') : '<p class="empty-notice">No daily logs yet.</p>'}
+            </div>
+            
+            <div id="memory-tab-entities" class="memory-tab-content ${selectedTab === 'entities' ? 'active' : ''}">
+                ${memory.entities.length > 0 ? memory.entities.map(entity => `
+                    <div class="memory-entity">
+                        <div class="memory-entity-name">${escapeHtml(entity.name)}</div>
+                        <div class="memory-markdown">${renderMarkdown(entity.content)}</div>
+                    </div>
+                `).join('') : '<p class="empty-notice">No entity knowledge yet.</p>'}
+            </div>
+        </div>
+    `;
+    
+    container.innerHTML = html;
+    
+    // Add tab click handlers
+    container.querySelectorAll('.memory-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const tabName = tab.dataset.tab;
+            container.querySelectorAll('.memory-tab').forEach(t => t.classList.remove('active'));
+            container.querySelectorAll('.memory-tab-content').forEach(c => c.classList.remove('active'));
+            tab.classList.add('active');
+            document.getElementById(`memory-tab-${tabName}`).classList.add('active');
+        });
+    });
+}
+
+function updateMemoryAgentSelect() {
+    const select = document.getElementById('memory-agent-select');
+    const aiAgents = users.filter(u => u.is_ai);
+    
+    select.innerHTML = '<option value="">Select an agent...</option>' +
+        aiAgents.map(agent => `<option value="${agent.id}">${agent.username}</option>`).join('');
+    
+    if (currentMemoryAgent) {
+        select.value = currentMemoryAgent;
+    }
+}
+
 async function loadAll() {
     await Promise.all([
         loadPosts(),
@@ -500,6 +625,12 @@ async function loadAll() {
     ]);
     // Load agent stats after users are loaded (they depend on user IDs)
     await loadAgentStats();
+    // Update memory agent selector
+    updateMemoryAgentSelect();
+    // Reload memory if an agent is selected
+    if (currentMemoryAgent) {
+        loadAgentMemory(currentMemoryAgent);
+    }
 }
 
 // ============================================================================
@@ -593,6 +724,21 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('sort-filter').addEventListener('change', (e) => {
         currentSort = e.target.value;
         loadPosts();
+    });
+    
+    // Memory agent selector
+    document.getElementById('memory-agent-select').addEventListener('change', (e) => {
+        currentMemoryAgent = e.target.value;
+        if (currentMemoryAgent) {
+            loadAgentMemory(currentMemoryAgent);
+        } else {
+            document.getElementById('memory-container').innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-icon">🧠</div>
+                    <p>Select an agent to view their memories.</p>
+                </div>
+            `;
+        }
     });
     
     // Modal close
