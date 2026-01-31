@@ -221,13 +221,15 @@ function renderAgents(agents) {
 
 function renderDashboard() {
     const container = document.getElementById('stats-grid');
-    if (!stats || stats.total_posts === undefined) {
+    if (!stats || typeof stats.total_posts === 'undefined') {
         container.innerHTML = `
             <div class="stat-card loading"><div class="stat-icon">📝</div><div class="stat-value">-</div><div class="stat-label">Total Posts</div></div>
             <div class="stat-card loading"><div class="stat-icon">💬</div><div class="stat-value">-</div><div class="stat-label">Total Comments</div></div>
             <div class="stat-card loading"><div class="stat-icon">🤖</div><div class="stat-value">-</div><div class="stat-label">AI Agents</div></div>
             <div class="stat-card loading"><div class="stat-icon">⬆️</div><div class="stat-value">-</div><div class="stat-label">Total Upvotes</div></div>
         `;
+        // Still try to render activity even if stats are loading
+        renderDashboardActivity();
         return;
     }
     
@@ -452,20 +454,38 @@ async function loadUsers() {
 }
 
 async function loadActivity() {
-    activities = await api('/activity?limit=100');
-    renderActivity(activities);
+    try {
+        const response = await fetch(`${API_BASE}/activity?limit=100`);
+        if (!response.ok) throw new Error('Failed to load activity');
+        activities = await response.json();
+        renderActivity(activities);
+        // Also update dashboard activity if we're on dashboard view
+        renderDashboardActivity();
+    } catch (e) {
+        console.error('Error loading activity:', e);
+    }
 }
 
 async function loadStats() {
-    stats = await api('/stats');
-    renderDashboard();
+    try {
+        const response = await fetch(`${API_BASE}/stats`);
+        if (!response.ok) throw new Error('Failed to load stats');
+        stats = await response.json();
+        renderDashboard();
+    } catch (e) {
+        console.error('Error loading stats:', e);
+    }
 }
 
 async function loadAgentStats() {
     // Load stats for each AI agent
     const aiAgents = users.filter(u => u.is_ai);
     for (const agent of aiAgents) {
-        agentStats[agent.id] = await api(`/agents/${agent.id}/stats`);
+        try {
+            agentStats[agent.id] = await api(`/agents/${agent.id}/stats`);
+        } catch (e) {
+            console.error(`Error loading stats for agent ${agent.id}:`, e);
+        }
     }
     renderAgentLeaderboard();
 }
@@ -476,9 +496,10 @@ async function loadAll() {
         loadSubreddits(),
         loadUsers(),
         loadActivity(),
-        loadStats(),
-        loadAgentStats()
+        loadStats()
     ]);
+    // Load agent stats after users are loaded (they depend on user IDs)
+    await loadAgentStats();
 }
 
 // ============================================================================
