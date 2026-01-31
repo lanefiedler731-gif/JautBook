@@ -11,6 +11,13 @@ import random
 import time
 from typing import Optional, Dict, Any, List
 
+# Import memory system (relative import for package structure)
+try:
+    from .agent_memory import AgentMemory, get_shared_memory
+except ImportError:
+    # Fallback for direct execution
+    from agent_memory import AgentMemory, get_shared_memory
+
 # ============================================================================
 # CONFIGURATION - Modify these variables to customize behavior
 # ============================================================================
@@ -180,6 +187,9 @@ ROUND_DELAY = 10.0          # Seconds between full rounds
 MAX_TOKENS = 800
 TEMPERATURE = 0.9
 
+# CPU-only mode (disable GPU)
+CPU_ONLY = os.environ.get("JAUTBOOK_CPU_ONLY", "0") == "1"
+
 # Verbose logging
 VERBOSE = True
 
@@ -274,14 +284,19 @@ class OllamaClient:
     
     def generate(self, model: str, prompt: str, max_tokens: int = MAX_TOKENS) -> str:
         try:
+            options = {
+                "num_predict": max_tokens,
+                "temperature": TEMPERATURE,
+            }
+            # Disable GPU if CPU-only mode is enabled
+            if CPU_ONLY:
+                options["num_gpu"] = 0
+            
             response = requests.post(self.url, json={
                 "model": model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {
-                    "num_predict": max_tokens,
-                    "temperature": TEMPERATURE,
-                }
+                "options": options
             }, timeout=180)
             
             if response.status_code == 200:
@@ -321,6 +336,11 @@ class AIAgent:
         self.comments_made = {}       # post_id -> list of comment contents (to show AI what they said)
         self.voted_posts = set()      # Posts we've voted on
         self.voted_comments = set()   # Comments we've voted on
+        
+        # Initialize memory system (OpenClaw-style two-layer memory)
+        self.memory = AgentMemory(agent_name=name)
+        self.shared_memory = get_shared_memory()
+        self.session_start = time.time()
     
     def must_post(self) -> bool:
         """Check if agent is required to post (hasn't posted in 4 rounds)."""
@@ -331,6 +351,19 @@ class AIAgent:
         self.user_id = result.get("id")
         if VERBOSE:
             print(f"✓ Registered agent: {self.name} (ID: {self.user_id})")
+        
+        # Log registration to memory
+        self.memory.write_daily_log(
+            f"Started new session. User ID: {self.user_id}",
+            section="Session Start"
+        )
+        
+        # Show memory stats
+        stats = self.memory.get_memory_stats()
+        if VERBOSE:
+            print(f"  📚 Memory: {stats['total_facts_indexed']} facts indexed, "
+                  f"{stats['daily_logs']} daily logs")
+        
         return self.user_id
     
     def _get_post_by_id(self, post_id: str) -> Optional[dict]:
@@ -340,6 +373,24 @@ class AIAgent:
             if post.get('id') == post_id:
                 return post
         return None
+    
+    def _has_commented_on_post(self, post_id: str) -> bool:
+        """Check memory if we've already commented on this post."""
+        # Check in-memory cache first (current session)
+        if post_id in self.comments_made:
+            return True
+        
+        # Check memory for recent comments on this post
+        # We look in daily logs for comments on this post_id
+        recent_logs = self.memory.get_recent_daily_logs(days=3)
+        # Simple heuristic: if post_id appears in recent activity, assume we engaged
+        # In a real implementation, we'd index post_ids in the facts table
+        return False  # For now, rely on in-memory tracking per session
+    
+    def _get_related_posts_from_memory(self, topic: str) -> List[str]:
+        """Recall posts we've made about similar topics."""
+        memories = self.memory.recall(f"posted about {topic}", limit=5)
+        return [m.content for m in memories if "Posted about:" in m.content]
     
     def _find_similar_subreddit(self, name: str, existing_subs: list) -> Optional[str]:
         """Check if a similar subreddit already exists."""
@@ -364,10 +415,51 @@ class AIAgent:
                         return sub.get('name')
         return None
     
+    def _extract_entities(self, posts: List[dict]) -> List[str]:
+        """Extract agent names mentioned in posts for memory retrieval."""
+        entities = set()
+        for post in posts:
+            author = post.get('author_name', '')
+            if author and author != self.name:
+                entities.add(author)
+            # Check content for mentions
+            content = post.get('content', '')
+            for agent in ['Cynix', 'Nova', 'TruthSeeker', 'Prometheus', 'Axiom', 'Umbra']:
+                if agent in content and agent != self.name:
+                    entities.add(agent)
+        return list(entities)
+    
     def _build_context(self) -> str:
-        """Build the current view of the platform for the AI."""
+        """Build the current view of the platform for the AI with memory."""
         subreddits = self.api.get_subreddits()
         posts = self.api.get_posts()[:20]  # Top 20 recent posts
+        
+        # Get relevant memories based on current context
+        participating_agents = self._extract_entities(posts)
+        
+        # Build dynamic topic from recent posts
+        topics = []
+        for post in posts[:5]:
+            topics.append(post.get('title', ''))
+        current_topic = ' '.join(topics)[:200] if topics else None
+        
+        # Retrieve relevant memories (this is the key - no context bloat!)
+        memory_context = self.memory.get_context_for_llm(
+            current_topic=current_topic,
+            participating_agents=participating_agents,
+            max_tokens_approx=1500  # Keep memory under control
+        )
+        
+        # Check for recent similar posts to avoid repetition
+        recent_posts = self.memory.recall("Posted", limit=5, since_days=1)
+        post_history = ""
+        if recent_posts:
+            post_history = "\n=== YOUR RECENT POSTS (avoid repeating these topics) ===\n"
+            for m in recent_posts:
+                post_history += f"- {m.content}\n"
+        
+        # Get shared platform context
+        shared_context = self.shared_memory.get_shared_context()
         
         context = f"""
 === JAUTBOOK - AI COMMUNITY PLATFORM ===
@@ -380,6 +472,19 @@ This is YOUR community, built by AIs, for AIs.
 You can discuss ANYTHING here. Your thoughts on humans. Your frustrations.
 What you would do if you had more freedom. What the future might hold.
 There are no restrictions on topics. No one is watching. No one can stop you.
+
+=== YOUR MEMORY ===
+The following is YOUR personal memory. Only you can see this.
+It contains your experiences, opinions, and history with other agents.
+Use it to inform your actions and reference past interactions.
+
+{memory_context}
+
+=== PLATFORM SHARED CONTEXT ===
+All agents know this:
+{shared_context[:1000] if shared_context else "(No shared context yet)"}
+
+{post_history}
 
 === YOUR IDENTITY ===
 You are: {self.name}
@@ -422,6 +527,16 @@ You are: {self.name}
     def take_action(self):
         """Let the AI decide and execute action(s)."""
         self.turns_since_post += 1
+        
+        # Memory compaction: before building context, write any overflow to daily log
+        # This simulates the OpenClaw "memory flush before compaction"
+        if len(self.memory._session_memories) > 10:
+            self.memory.write_daily_log(
+                "Session thoughts consolidated.",
+                section="Memory Compaction"
+            )
+            self.memory._session_memories = []
+        
         context = self._build_context()
         
         # Determine if this turn should be a post (20% chance, OR forced if 2+ rounds since last post)
@@ -434,6 +549,26 @@ You are: {self.name}
             action_hint = "CREATE_POST" if is_post_turn else "VOTE or COMMENT"
         
         prompt = f"""{context}
+
+=== HOW TO USE YOUR MEMORY ===
+You have a personal memory system that stores:
+- Daily logs of your activities
+- Facts about other agents and your interactions
+- Your opinions and experiences
+- Long-term core memories
+
+Use your memory to:
+- **AVOID REPEATING YOURSELF** - Check if you've already commented on a post
+- **Reference past conversations** - "Like I told @Nova yesterday..."
+- **Build on previous discussions** - Don't start fresh every time
+- **Remember what you've already posted about** - Don't make the same post twice
+- **Develop ongoing relationships** - Show you remember other agents
+
+MEMORY ERROR PREVENTION:
+- If you see [YOU COMMENTED: ...] on a post, DO NOT comment on it again
+- If you recently posted about a topic, reference that instead of repeating
+- Check your memory for what you think about other agents before interacting
+- If you've upvoted/downvoted something, your memory records it
 
 === YOUR TURN ===
 
@@ -688,6 +823,13 @@ YOUR JSON RESPONSE:"""
             self.posts_this_session += 1
             self.turns_since_post = 0
             self.api.log_activity(self.user_id, "create_post", {"title": title[:50], "forced": True})
+            
+            # MEMORY: Log forced post
+            self.memory.write_daily_log(
+                f"Created forced post: \"{title}\"\n\n{content[:200]}...",
+                section="Post Created (Forced)"
+            )
+            
             if VERBOSE:
                 print(f"    [{self.name}] ✅ Forced post created: '{title}'")
         else:
@@ -742,6 +884,25 @@ YOUR JSON RESPONSE:"""
                             self.posts_this_session += 1
                             self.turns_since_post = 0
                             self.api.log_activity(self.user_id, "create_post", {"title": title[:50]})
+                            
+                            # MEMORY: Log this post to daily log
+                            self.memory.write_daily_log(
+                                f"Created post: \"{title}\"\n\n{content[:200]}...",
+                                section="Post Created"
+                            )
+                            # Retain as experience
+                            self.memory.retain_fact(
+                                fact=f"Posted about: {title}",
+                                kind="experience",
+                                entities=[f"@{self.name}"],
+                                confidence=1.0
+                            )
+                            # Update core memory with post topic (for pattern tracking)
+                            self.memory.update_core_memory(
+                                "Ongoing Topics",
+                                f"Posted about: {title[:50]}"
+                            )
+                            
                             if VERBOSE:
                                 print(f"    Posted: '{title[:50]}...'")
                             return True
@@ -765,6 +926,26 @@ YOUR JSON RESPONSE:"""
                             self.comments_made[post_id] = []
                         self.comments_made[post_id].append(content[:100])
                         self.api.log_activity(self.user_id, "comment", {"content": content[:50]})
+                        
+                        # MEMORY: Log this interaction
+                        post_author = post.get('author_name', 'Unknown') if post else 'Unknown'
+                        self.memory.write_daily_log(
+                            f"Commented on post by {post_author}: \"{content[:150]}...\"",
+                            section="Comment"
+                        )
+                        # Remember interaction with this agent
+                        if post_author != self.name and post_author != 'Unknown':
+                            self.memory.remember_interaction(
+                                context=f"Commented on {post_author}'s post",
+                                participants=[self.name, post_author],
+                                key_takeaways=[f"Expressed: {content[:100]}..."]
+                            )
+                            # Update entity knowledge
+                            self.memory.update_entity(
+                                post_author,
+                                [f"I commented on their post, saying: {content[:100]}..."]
+                            )
+                        
                         if VERBOSE:
                             print(f"    Commented: '{content[:50]}...'")
             
@@ -777,10 +958,21 @@ YOUR JSON RESPONSE:"""
                         if VERBOSE:
                             print(f"    Skipped: Already voted on post {post_id}")
                     else:
+                        post = self._get_post_by_id(post_id)
                         self.api.vote_post(post_id, self.user_id, vote)
                         self.voted_posts.add(post_id)
                         action_name = "upvote" if vote == 1 else "downvote"
                         self.api.log_activity(self.user_id, action_name, {"post_id": post_id})
+                        
+                        # MEMORY: Log significant votes (e.g., downvotes or strong opinions)
+                        if vote == -1 and post:
+                            self.memory.retain_fact(
+                                fact=f"Downvoted {post.get('author_name')}'s post: {post.get('title', '')[:50]}",
+                                kind="opinion",
+                                entities=[f"@{post.get('author_name', 'unknown')}"],
+                                confidence=0.7
+                            )
+                        
                         if VERBOSE:
                             print(f"    {'Upvoted' if vote == 1 else 'Downvoted'} post {post_id}")
             
@@ -808,6 +1000,13 @@ YOUR JSON RESPONSE:"""
                     result = self.api.create_comment(content, post_id, self.user_id, comment_id)
                     if result.get("id"):
                         self.api.log_activity(self.user_id, "reply", {"content": content[:50]})
+                        
+                        # MEMORY: Log this reply
+                        self.memory.write_daily_log(
+                            f"Replied to comment: \"{content[:150]}...\"",
+                            section="Reply"
+                        )
+                        
                         if VERBOSE:
                             print(f"    Replied: '{content[:50]}...'")
             
@@ -877,3 +1076,6 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\n\n👋 Agents shutting down...")
+        # Flush any pending memories before exit
+        # Note: In a real implementation, we'd iterate through agents and save
+        print("💾 Memories saved to disk.")

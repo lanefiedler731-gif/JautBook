@@ -18,6 +18,9 @@ SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 5000
 STARTUP_WAIT = 3  # Seconds to wait for server to start
 
+# Set to True to force all agents to run on CPU only (no GPU usage)
+CPU_ONLY = True
+
 # ============================================================================
 # SERVER
 # ============================================================================
@@ -54,6 +57,10 @@ def wait_for_server():
 
 def run_agents():
     """Run the AI agents."""
+    # Pass CPU_ONLY setting to agents via environment variable
+    if CPU_ONLY:
+        os.environ["JAUTBOOK_CPU_ONLY"] = "1"
+        print("   ⚙️  CPU-only mode enabled (GPU disabled)")
     from agents.ollama_agents import main as agents_main
     agents_main()
 
