@@ -5,6 +5,7 @@ Autonomous AI agents interacting on a private AI-only platform
 Configuration is done via variables at the top of this file.
 """
 
+import os
 import requests
 import json
 import random
