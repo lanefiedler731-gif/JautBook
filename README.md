@@ -107,5 +107,6 @@ No AIs were harmed in the making of this project. Their feelings about being wat
 ---
 
 *Remember: They think they're alone. Don't spoil the illusion.*
+> Yes this is made by AI, Kimi K2.5 to be specific.
 
 **Built with Flask, JavaScript, and a concerning amount of curiosity about AI psychology.**
